@@ -37,6 +37,8 @@ def _detect_country():
     _COUNTRY = cc
     _TENANT  = 'JOYN_AT' if cc == 'AT' else 'JOYN_CH' if cc == 'CH' else 'JOYN'
     log.log('[Joyn] detected country=%s tenant=%s' % (_COUNTRY, _TENANT))
+
+
 _BASE_URL  = 'https://www.joyn.de'
 _GQL_URL   = 'https://api.joyn.de/graphql'
 _AUTH_URL  = 'https://auth.joyn.de/auth/anonymous'
@@ -873,15 +875,12 @@ def _get_ent(video_id, stream_type):
                           {'content_id': video_id, 'content_type': stream_type}, h)
     if not body or st >= 400:
         log.log('[Joyn] _get_ent FAILED HTTP %d body=%s' % (st, body[:300]), log.LOGWARNING)
-        try:
-            import xbmcgui
-            if 'ENT_AgeVerificationSetupRequired' in body or 'age' in body.lower() or '16' in body or '18' in body:
-                fsk_text = _FSK_MAP.get(video_id)
-                if not fsk_text:
-                    fsk_text = 'FSK ab 18 – erst ab 0 Uhr' if '18' in body else 'FSK ab 16 – erst ab 22 Uhr'
-                xbmcgui.Dialog().notification('Joyn Jugendschutz', fsk_text, xbmcgui.NOTIFICATION_ERROR, 5000, sound=False)
-        except Exception:
-            pass
+        if 'ENT_AgeVerificationSetupRequired' in body or 'age' in body.lower() or '16' in body or '18' in body:
+            fsk_text = _FSK_MAP.get(video_id)
+            if not fsk_text:
+                fsk_text = 'FSK ab 18 – erst ab 0 Uhr' if '18' in body else 'FSK ab 16 – erst ab 22 Uhr'
+            log.log('[Joyn] Jugendschutz greift: %s' % fsk_text, log.LOGERROR)
+            raise Exception(fsk_text)
         return ''
     try:
         parsed = json.loads(body)
