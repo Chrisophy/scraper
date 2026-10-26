@@ -1,2 +1,1 @@
-# scraper
-Sammlung diverser Scraper
+Sammlung diverser Scraper für MovieScout APK
