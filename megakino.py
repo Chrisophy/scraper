@@ -23,7 +23,7 @@ def _base():
     if not _BASE_URL:
         try:
             domain = multiquest.get(
-                'https://raw.githubusercontent.com/mr-evil1/megakino/main/megakino-url.json',
+                'https://raw.githubusercontent.com/Chrisophy/megakino/main/megakino-url.json',
                 timeout=5
             ).json().get('url', SITE_DOMAIN)
             _BASE_URL = 'https://' + domain
