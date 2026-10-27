@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
+import os
 import re
+import time
 import unicodedata
 from html import unescape
 from urllib.parse import urljoin, unquote
 from resources.lib import multiquest, log
 from resources.lib.captcha.captcha_helper import solve_recaptcha, extract_recaptcha_sitekey
+try:
+    from resources.lib.captcha.captcha_helper import get_last_error as _captcha_last_error
+except ImportError:  # älterer captcha_helper
+    def _captcha_last_error():
+        return ''
 
 SITE_ID       = 'bsto'
 SITE_NAME     = 'BS.to'
@@ -26,14 +33,24 @@ def _get(url, referer=None, caching=True):
     }
     if referer:
         headers['Referer'] = referer
-    try:
-        r = multiquest.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        log.log('[bsto] _get OK url=%s size=%d' % (url, len(r.text)))
-        return r.text
-    except Exception as e:
-        log.log('[bsto] _get FAILED url=%s error=%s' % (url, e), log.LOGERROR)
-        return ''
+    # Bis zu 3 Versuche mit wachsendem Timeout: burningseries antwortet zeitweise
+    # langsam (Rate-Limit) – ein einzelner Timeout soll nicht gleich 0 Hoster bedeuten.
+    last_err = None
+    for attempt, tmo in enumerate((12, 20, 30), 1):
+        try:
+            r = multiquest.get(url, headers=headers, timeout=tmo)
+            r.raise_for_status()
+            log.log('[bsto] _get OK url=%s size=%d%s' % (
+                url, len(r.text), '' if attempt == 1 else ' (Versuch %d)' % attempt))
+            return r.text
+        except Exception as e:
+            last_err = e
+            log.log('[bsto] _get Versuch %d/3 fehlgeschlagen url=%s error=%s' % (attempt, url, e),
+                    log.LOGWARNING)
+            if attempt < 3:
+                time.sleep(0.6 * attempt)
+    log.log('[bsto] _get FAILED url=%s error=%s' % (url, last_err), log.LOGERROR)
+    return ''
 
 
 def _post(url, data, referer=None):
@@ -153,6 +170,12 @@ def _language_from_code(code):
     return '', ''
 
 
+def _captcha_hook_spec():
+    return (os.environ.get('MOVIESCOUT_CAPTCHA_HOOK')
+            or os.environ.get('MINIKODI_CAPTCHA_HOOK')
+            or '').strip()
+
+
 def _resolve_hoster_url(hoster_path, page_url):
     import json as _json
     full_url = urljoin(_base(), hoster_path)
@@ -164,14 +187,25 @@ def _resolve_hoster_url(hoster_path, page_url):
         'Referer':         page_url,
     })
 
-    try:
-        r = sess.get(full_url, timeout=10)
-        html = r.text
-        final_url = r.url or full_url
-    except Exception as e:
-        log.log('[bsto] _resolve_hoster_url: GET fehlgeschlagen url=%s error=%s' % (full_url, e), log.LOGERROR)
+    r = None
+    last_err = None
+    for attempt, tmo in enumerate((12, 25), 1):
+        try:
+            r = sess.get(full_url, timeout=tmo)
+            break
+        except Exception as e:
+            last_err = e
+            log.log('[bsto] _resolve_hoster_url: GET Versuch %d/2 fehlgeschlagen url=%s error=%s' % (
+                attempt, full_url, e), log.LOGWARNING)
+            if attempt < 2:
+                time.sleep(0.6)
+    if r is None:
+        log.log('[bsto] _resolve_hoster_url: GET fehlgeschlagen url=%s error=%s' % (full_url, last_err),
+                log.LOGERROR)
         sess.close()
         return ''
+    html = r.text
+    final_url = r.url or full_url
 
     if not html:
         log.log('[bsto] _resolve_hoster_url: leere Antwort url=%s' % full_url, log.LOGERROR)
@@ -214,7 +248,10 @@ def _resolve_hoster_url(hoster_path, page_url):
         }
         log.log('[bsto] _resolve_hoster_url: POST embed.php LID=%s ticket=%s' % (lid_m.group(1), bool(ticket)))
         resp = sess.post(embed_url, data=data, headers=embed_headers)
-        parsed = _json.loads(resp.text)
+        body = resp.text or ''
+        log.log('[bsto] _resolve_hoster_url: embed.php HTTP %s Antwort=%s' % (
+            getattr(resp, 'status_code', '?'), body[:300].replace('\n', ' ')))
+        parsed = _json.loads(body)
         return parsed.get('link', '') or ''
 
     try:
@@ -231,11 +268,21 @@ def _resolve_hoster_url(hoster_path, page_url):
         log.log('[bsto] _resolve_hoster_url: sitekey=%s versuche captcha' % sitekey)
         try:
             captcha_token = solve_recaptcha(sitekey, final_url)
-            link = _post_embed(captcha_token or '')
-            if link:
-                log.log('[bsto] _resolve_hoster_url: link (captcha)=%s' % link)
-                sess.close()
-                return link
+            if not captcha_token:
+                reason = _captcha_last_error()
+                if not reason and not _captcha_hook_spec():
+                    reason = ('kein Captcha-Dienst eingerichtet (API-Schlüssel in captcha_solver.json '
+                              'eintragen oder MOVIESCOUT_CAPTCHA_HOOK setzen)')
+                log.log('[bsto] _resolve_hoster_url: KEIN Captcha-Token: %s' % (reason or 'unbekannter Grund'),
+                        log.LOGWARNING)
+            else:
+                log.log('[bsto] _resolve_hoster_url: Captcha-Token erhalten (len=%d)' % len(captcha_token))
+                link = _post_embed(captcha_token)
+                if link:
+                    log.log('[bsto] _resolve_hoster_url: link (captcha)=%s' % link)
+                    sess.close()
+                    return link
+                log.log('[bsto] _resolve_hoster_url: Token wurde von der Seite nicht akzeptiert', log.LOGWARNING)
         except Exception as e:
             log.log('[bsto] _resolve_hoster_url: captcha Pfad fehlgeschlagen: %s' % e, log.LOGERROR)
     else:

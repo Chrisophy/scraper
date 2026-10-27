@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
+import bisect
+import gzip
+import hashlib
 import json
 import os
 import re
 import time
 import unicodedata
 import urllib.parse
+import urllib.request
 import uuid
 
 import xbmcaddon
@@ -49,9 +53,36 @@ _PERSISTED_HASHES = {
     'StreamingUrl':              'd2210e84a51ed4a4382c15720a7366ee955d6354ee76039f58a34ecf274134b7',
 }
 
-_LIVE_HASHES    = dict(_PERSISTED_HASHES)
-_GQL_FAILED_OPS = set()
+# Signatur der eingebauten Hashes: ändert sich der Standard im Code, wird ein
+# alter Cache auf der Platte ignoriert (sonst überschreibt er die neuen Hashes).
+_DEFAULTS_SIG = hashlib.md5(
+    '|'.join('%s=%s' % kv for kv in sorted(_PERSISTED_HASHES.items())).encode('utf-8')
+).hexdigest()
+
+_LIVE_HASHES = dict(_PERSISTED_HASHES)
 _DISCOVERY_COOLDOWN_SEC = 300
+
+
+def _dig(data, *keys):
+    """Null-sicher durch verschachtelte Dicts laufen, liefert {} wenn etwas fehlt oder null ist."""
+    cur = data
+    for k in keys:
+        if not isinstance(cur, dict):
+            return {}
+        cur = cur.get(k)
+        if cur is None:
+            return {}
+    return cur
+
+
+def _dig_list(data, *keys):
+    r = _dig(data, *keys)
+    return r if isinstance(r, list) else []
+
+
+def _dig_dict(data, *keys):
+    r = _dig(data, *keys)
+    return r if isinstance(r, dict) else {}
 
 
 def _hash_cache_path():
@@ -71,7 +102,11 @@ def _load_hash_cache():
         if os.path.isfile(path):
             with open(path) as f:
                 cached = json.load(f)
-            hashes = {k: v for k, v in cached.items() if k != '_ts'}
+            if cached.get('_sig') != _DEFAULTS_SIG:
+                log.log('[PlutoTV] Hash-Cache gehört zu einer älteren Version, wird ignoriert')
+                return
+            hashes = {k: v for k, v in cached.items()
+                      if k in _PERSISTED_HASHES and isinstance(v, str) and len(v) == 64}
             _LIVE_HASHES.update(hashes)
             log.log('[PlutoTV] Hashes aus Cache geladen: %d' % len(hashes))
     except Exception as e:
@@ -97,6 +132,7 @@ def _save_hash_cache():
         os.makedirs(os.path.dirname(path), exist_ok=True)
         data = dict(_LIVE_HASHES)
         data['_ts'] = time.time()
+        data['_sig'] = _DEFAULTS_SIG
         with open(path, 'w') as f:
             json.dump(data, f)
     except Exception as e:
@@ -116,17 +152,31 @@ def _discover_hashes():
 
     op_names = set(_PERSISTED_HASHES.keys())
     found    = {}
+    used     = set()
     hex64    = re.compile(r'[0-9a-f]{64}')
 
     for url in js_urls:
         chunk, _ = _http_get(url, timeout=30)
         if not chunk or len(chunk) < 5000:
             continue
-        for m in hex64.finditer(chunk):
-            window = chunk[max(0, m.start() - 400): m.start() + 400]
-            for op in op_names:
-                if op in window and op not in found:
-                    found[op] = m.group(0)
+        hexes = [(m.start(), m.group(0)) for m in hex64.finditer(chunk)]
+        if not hexes:
+            continue
+        positions = [p for p, _h in hexes]
+        for op in op_names:
+            if op in found:
+                continue
+            best = None
+            for om in re.finditer(re.escape(op), chunk):
+                i = bisect.bisect_left(positions, om.start())
+                for j in range(max(0, i - 3), min(len(hexes), i + 3)):
+                    pos, hx = hexes[j]
+                    dist = abs(pos - om.start())
+                    if dist <= 400 and hx not in used and (best is None or dist < best[0]):
+                        best = (dist, hx)
+            if best:
+                found[op] = best[1]
+                used.add(best[1])
         if found:
             log.log('[PlutoTV] Discovery in %s: %s' % (url.split('/')[-1], list(found.keys())))
         if len(found) >= len(op_names):
@@ -138,6 +188,19 @@ def _discover_hashes():
         log.log('[PlutoTV] Discovery abgeschlossen: %d/%d Hashes aktualisiert' % (len(found), len(op_names)))
         return True
     log.log('[PlutoTV] Discovery: keine Hashes gefunden', log.LOGWARNING)
+    return False
+
+
+def _recover_hash(operation, retry):
+    """Bei kaputtem Hash gegensteuern. True = Anfrage wiederholen."""
+    default = _PERSISTED_HASHES.get(operation)
+    if retry == 0 and default and _LIVE_HASHES.get(operation) != default:
+        log.log('[PlutoTV] Hash für %s auf eingebauten Standardwert zurückgesetzt' % operation, log.LOGWARNING)
+        _LIVE_HASHES[operation] = default
+        return True
+    if time.time() - _last_discovery_ts() > _DISCOVERY_COOLDOWN_SEC:
+        if _discover_hashes():
+            return True
     return False
 
 
@@ -218,6 +281,9 @@ def _http_get(url, params=None, timeout=15, extra_headers=None):
     try:
         r = multiquest.get(url, params=params, headers=_headers(extra_headers), timeout=timeout)
         log.log('[PlutoTV] HTTP %d %s' % (r.status_code, url.split('?')[0]))
+        if r.status_code >= 400:
+            log.log('[PlutoTV] HTTP %d Antwort: %s' % (r.status_code, (r.text or '')[:200].replace('\n', ' ')),
+                    log.LOGWARNING)
         return r.text, r.status_code
     except Exception as e:
         log.log('[PlutoTV] HTTP Fehler %s | url=%s' % (e, url.split('?')[0]), log.LOGWARNING)
@@ -235,7 +301,7 @@ def _stream_cookie():
     ])
 
 
-def _gql(base, operation, variables, _retry=False, auth=''):
+def _gql_once(base, operation, variables, _retry=0, auth=''):
     params = {
         'operationName': operation,
         'variables':     json.dumps(variables),
@@ -259,32 +325,59 @@ def _gql(base, operation, variables, _retry=False, auth=''):
     body, status = _http_get(base, params=params, extra_headers=extra)
     if not body or status >= 400:
         log.log('[PlutoTV] GQL %s HTTP %d leer=%s' % (operation, status, not body), log.LOGWARNING)
+        if status >= 400 and _retry < 2 and _recover_hash(operation, _retry):
+            return _gql_once(base, operation, variables, _retry=_retry + 1, auth=auth)
         return None
     try:
         data = json.loads(body)
     except Exception as e:
         log.log('[PlutoTV] GQL %s JSON Fehler: %s | body[:200]=%s' % (operation, e, body[:200]), log.LOGWARNING)
         return None
+    if not isinstance(data, dict):
+        log.log('[PlutoTV] GQL %s unerwartete Antwort: %s' % (operation, body[:200]), log.LOGWARNING)
+        return None
     if operation == 'StreamingUrl':
-        su = ((data.get('data') or {}).get('streamingUrl') or {})
+        su = _dig_dict(data, 'data', 'streamingUrl')
         log.log('[PlutoTV] StreamingUrl success=%s paths=%d invalidIp=%s isInVPN=%s' % (
             su.get('success'), len(su.get('stitcherPaths') or []), su.get('invalidIp'), su.get('isInVPN')))
     errors = data.get('errors')
     if errors:
         log.log('[PlutoTV] GQL %s Fehler: %s' % (operation, errors), log.LOGWARNING)
-        is_server_error = any(
-            (e.get('extensions', {}).get('code') == 'INTERNAL_SERVER_ERROR')
-            for e in errors if isinstance(e, dict)
-        )
-        if is_server_error and not _retry and operation not in _GQL_FAILED_OPS:
-            age = time.time() - _last_discovery_ts()
-            if age > _DISCOVERY_COOLDOWN_SEC:
-                if _discover_hashes():
-                    return _gql(base, operation, variables, _retry=True, auth=auth)
-            _GQL_FAILED_OPS.add(operation)
-        if not (data.get('data') or {}):
+        needs_recovery = False
+        for e in errors:
+            if not isinstance(e, dict):
+                continue
+            code = (e.get('extensions') or {}).get('code') or ''
+            msg  = str(e.get('message') or '').lower()
+            if code == 'INTERNAL_SERVER_ERROR' or 'persisted' in msg or 'persisted' in str(code).lower():
+                needs_recovery = True
+                break
+        if needs_recovery and _retry < 2 and _recover_hash(operation, _retry):
+            return _gql_once(base, operation, variables, _retry=_retry + 1, auth=auth)
+        payload = data.get('data')
+        if not payload or (isinstance(payload, dict) and all(v is None for v in payload.values())):
             return None
     return data
+
+
+
+_NO_JWT_OPS = ('StreamingUrl',)
+
+
+def _gql(base, operation, variables, _retry=0, auth=''):
+    """Erst anonym; bei Fehlschlag einmal mit Boot-JWT (Pluto verlangt ihn teils)."""
+    data = _gql_once(base, operation, variables, _retry=_retry, auth=auth)
+    if data is not None or auth or operation in _NO_JWT_OPS:
+        return data
+    try:
+        jwt = _get_session_jwt()
+    except Exception as e:
+        log.log('[PlutoTV] JWT-Retry: Boot fehlgeschlagen %s' % e, log.LOGWARNING)
+        jwt = ''
+    if not jwt:
+        return None
+    log.log('[PlutoTV] GQL %s: wiederhole mit Boot-JWT' % operation, log.LOGWARNING)
+    return _gql_once(base, operation, variables, _retry=_retry, auth=jwt)
 
 
 def _image(path, w=300):
@@ -419,9 +512,9 @@ def _get_stitch_path(content_id, content_type='vod'):
         }, auth=jwt)
         if not data:
             continue
-        paths = (data.get('data', {}).get('streamingUrl', {}).get('stitcherPaths') or [])
-        hls = next((p['path'] for p in paths if p.get('type') == 'hls'), '')
-        mpd = next((p['path'] for p in paths if p.get('type') == 'mpd'), '')
+        paths = [p for p in _dig_list(data, 'data', 'streamingUrl', 'stitcherPaths') if isinstance(p, dict)]
+        hls = next((p.get('path') for p in paths if p.get('type') == 'hls' and p.get('path')), '')
+        mpd = next((p.get('path') for p in paths if p.get('type') == 'mpd' and p.get('path')), '')
         log.log('[PlutoTV] stitch contentId=%s drm=%s paths=%d hls=%s mpd=%s' % (
             content_id, drm_type, len(paths), bool(hls), bool(mpd)))
         if mpd:
@@ -435,8 +528,11 @@ def _browse_nav():
     data = _gql(_GQL_HUBS, 'browseNav', {'extraParams': {}})
     if not data:
         return [], []
-    nav = (data.get('data', {}).get('browseNav', {}).get('globalMenu') or {})
-    return nav.get('movieBrowseNav', []), nav.get('showBrowseNav', [])
+    nav = _dig_dict(data, 'data', 'browseNav', 'globalMenu')
+    if not nav:
+        log.log('[PlutoTV] browseNav: globalMenu fehlt | data-keys=%s' % list(_dig_dict(data, 'data').keys()),
+                log.LOGWARNING)
+    return nav.get('movieBrowseNav') or [], nav.get('showBrowseNav') or []
 
 
 def _collection(slug):
@@ -447,7 +543,7 @@ def _collection(slug):
     })
     if not data:
         return []
-    return (data.get('data', {}).get('collection', {}).get('hubCarousels') or [])
+    return _dig_list(data, 'data', 'collection', 'hubCarousels')
 
 
 def _carousel_data(token, carousel_id='', carousel_type='', model='universalContent',
@@ -485,12 +581,15 @@ def _carousel_data(token, carousel_id='', carousel_type='', model='universalCont
     if not data:
         log.log('[PlutoTV] _carousel_data keine Antwort für carouselId=%s' % carousel_id, log.LOGWARNING)
         return [], 0
-    result = ((data.get('data') or {}).get('carouselData') or {}).get('result') or {}
+    result = _dig_dict(data, 'data', 'carouselData', 'result')
     if not result:
-        log.log('[PlutoTV] _carousel_data result leer | keys=%s' % list(data.get('data', {}).keys()), log.LOGWARNING)
+        log.log('[PlutoTV] _carousel_data result leer | keys=%s' % list(_dig_dict(data, 'data').keys()), log.LOGWARNING)
         return [], 0
     items = result.get('data') or []
-    total = int(result.get('total') or 0)
+    try:
+        total = int(result.get('total') or 0)
+    except (TypeError, ValueError):
+        total = 0
     log.log('[PlutoTV] _carousel_data carouselId=%s raw=%d total=%d' % (carousel_id, len(items), total))
     return items, total
 
@@ -510,7 +609,7 @@ def _channels_many(category_slug=None, start=0, rows=500):
     data = _gql(_GQL_VIDEO, 'ChannelsMany', {'params': p})
     if not data:
         return []
-    return (data.get('data', {}).get('channels', {}).get('channels') or [])
+    return _dig_list(data, 'data', 'channels', 'channels')
 
 
 def _channel_categories():
@@ -519,7 +618,7 @@ def _channel_categories():
     })
     if not data:
         return []
-    return (data.get('data', {}).get('channelCategories', {}).get('channelCategories') or [])
+    return _dig_list(data, 'data', 'channelCategories', 'channelCategories')
 
 
 def _paginated_episodes(show_id, season_num, begin=0):
@@ -531,8 +630,8 @@ def _paginated_episodes(show_id, season_num, begin=0):
     })
     if not data:
         return [], []
-    fe = (data.get('data', {}).get('fullEpisodes') or {})
-    return fe.get('availableSeasonNums', []), fe.get('episodes', [])
+    fe = _dig_dict(data, 'data', 'fullEpisodes')
+    return fe.get('availableSeasonNums') or [], fe.get('episodes') or []
 
 
 def _norm(text):
@@ -556,8 +655,10 @@ def _search_results(query):
     vod  = []
     data = _gql(_GQL_HUBS, 'GetVODContent', {'query': query})
     if data:
-        raw = ((data.get('data') or {}).get('searchVODContent') or {}).get('data') or []
+        raw = _dig_list(data, 'data', 'searchVODContent', 'data')
         for e in raw:
+            if not isinstance(e, dict):
+                continue
             eid = e.get('movieId') or e.get('id')
             if not eid or eid in seen:
                 continue
@@ -569,8 +670,10 @@ def _search_results(query):
     live = []
     data = _gql(_GQL_HUBS, 'GetSearchVideoCarousel', {'query': query})
     if data:
-        raw = ((data.get('data') or {}).get('searchVideoCarousel') or {}).get('data') or []
+        raw = _dig_list(data, 'data', 'searchVideoCarousel', 'data')
         for e in raw:
+            if not isinstance(e, dict):
+                continue
             cid = e.get('id')
             if not cid or cid in seen or e.get('contentType') != 'channel':
                 continue
@@ -591,9 +694,18 @@ def _rest_vod_all():
     now = time.time()
     if _REST_VOD_CACHE['data'] is not None and (now - _REST_VOD_CACHE['ts']) < _REST_VOD_TTL:
         return _REST_VOD_CACHE['data']
+    did = _get_device_id()
     params = {
         'includeItems':            'true',
         'deviceType':              'web',
+        'deviceMake':              'chrome',
+        'deviceModel':             'web',
+        'deviceVersion':           '136.0.0',
+        'appName':                 'web',
+        'appVersion':              _APP_VERSION,
+        'deviceId':                did,
+        'clientID':                did,
+        'sid':                     _get_session_id(),
         'userState':               'ANONYMOUS',
         'userRegistrationCountry': _COUNTRY,
         'userProfileType':         'ADULT',
@@ -607,7 +719,7 @@ def _rest_vod_all():
         log.log('[PlutoTV] REST VOD Fehler HTTP %d' % status, log.LOGWARNING)
         return []
     try:
-        cats = json.loads(body).get('categories', [])
+        cats = json.loads(body).get('categories') or []
         _REST_VOD_CACHE['data'] = cats
         _REST_VOD_CACHE['ts']   = now
         log.log('[PlutoTV] REST VOD: %d Kategorien' % len(cats))
@@ -659,6 +771,58 @@ def _item_from_rest(entry):
     return None
 
 
+def _rest_kind_items(cat, kind):
+    items = []
+    for entry in (cat.get('items') or cat.get('content') or []):
+        if not isinstance(entry, dict):
+            continue
+        item = _item_from_rest(entry)
+        if not item:
+            continue
+        if kind == 'movie' and item.get('mediatype') != 'movie':
+            continue
+        if kind == 'show' and item.get('mediatype') != 'tvshow':
+            continue
+        items.append(item)
+    return items
+
+
+def _rest_genres(kind):
+    """Genre-Liste direkt aus der REST-API (Fallback, wenn browseNav leer ist)."""
+    out = []
+    for cat in _rest_vod_all():
+        if not isinstance(cat, dict):
+            continue
+        cid  = cat.get('_id') or cat.get('id') or ''
+        name = cat.get('name') or ''
+        if not cid or not name:
+            continue
+        n = len(_rest_kind_items(cat, kind))
+        if not n:
+            continue
+        out.append({
+            'title':       '%s (%d)' % (name, n),
+            'url':         'restcat:%s:%s' % (kind, cid),
+            'plot':        name,
+            'is_playable': False,
+            'next_func':   'showEntries',
+            'poster':      _ICON,
+            'icon':        _ICON,
+        })
+    log.log('[PlutoTV] REST-Genres kind=%s count=%d' % (kind, len(out)))
+    return out
+
+
+def _rest_category_entries(kind, cat_id):
+    for cat in _rest_vod_all():
+        if isinstance(cat, dict) and (cat.get('_id') or cat.get('id')) == cat_id:
+            items = _rest_kind_items(cat, kind)
+            log.log('[PlutoTV] REST-Kategorie %s kind=%s count=%d' % (cat.get('name'), kind, len(items)))
+            return items
+    log.log('[PlutoTV] REST-Kategorie %s nicht gefunden' % cat_id, log.LOGWARNING)
+    return []
+
+
 def _rest_carousel_fallback(carousel_id, kind=''):
     cats  = _rest_vod_all()
     if not cats:
@@ -674,9 +838,9 @@ def _rest_carousel_fallback(carousel_id, kind=''):
         score = 0
         if slug == cat_id or slug == cat_name or slug == cat_slug:
             score = 3
-        elif slug in cat_id or slug in cat_name or slug in cat_slug:
+        elif slug and (slug in cat_id or slug in cat_name or slug in cat_slug):
             score = 2
-        elif cat_id in slug or cat_name in slug or cat_slug in slug:
+        elif (cat_id and cat_id in slug) or (cat_name and cat_name in slug) or (cat_slug and cat_slug in slug):
             score = 1
         if score > best_score:
             best_score = score
@@ -731,8 +895,8 @@ def _item_from_entry(entry):
             'next_func':   'get_hosters',
         }
 
-    if ct == 'show':
-        show_id = entry.get('id') or ''
+    if ct in ('show', 'series'):
+        show_id = entry.get('id') or entry.get('showId') or ''
         if not show_id:
             return None
         return {
@@ -829,6 +993,8 @@ def showGenres(url='', params=None):
     kind = 'movie' if is_movie else 'show'
     items = []
     for entry in nav:
+        if not isinstance(entry, dict):
+            continue
         label = entry.get('label') or ''
         slug  = entry.get('slug') or ''
         if not slug:
@@ -842,7 +1008,12 @@ def showGenres(url='', params=None):
             'poster':      _ICON,
             'icon':        _ICON,
         })
-    log.log('[PlutoTV] showGenres kind=%s count=%d' % (kind, len(items)))
+    if items:
+        log.log('[PlutoTV] showGenres kind=%s count=%d' % (kind, len(items)))
+    else:
+        log.log('[PlutoTV] showGenres kind=%s: KEINE Genres (browseNav leer oder Hash ungültig) -> REST' % kind,
+                log.LOGWARNING)
+        items = _rest_genres(kind)
     return items
 
 
@@ -855,6 +1026,8 @@ def showCarousels(url='', params=None):
     carousels = _collection(slug)
     items = []
     for c in carousels:
+        if not isinstance(c, dict):
+            continue
         token       = c.get('token') or ''
         title       = c.get('title') or ''
         carousel_id = c.get('carouselId') or ''
@@ -878,11 +1051,19 @@ def showCarousels(url='', params=None):
             'poster':      _ICON,
             'icon':        _ICON,
         })
-    log.log('[PlutoTV] showCarousels slug=%s count=%d' % (slug, len(items)))
+    if items:
+        log.log('[PlutoTV] showCarousels slug=%s count=%d' % (slug, len(items)))
+    else:
+        log.log('[PlutoTV] showCarousels slug=%s: KEINE Karussells (roh=%d) -> REST' % (slug, len(carousels)),
+                log.LOGWARNING)
+        items = _rest_genres(kind)
     return items
 
 
 def showEntries(url='', params=None):
+    if url.startswith('restcat:'):
+        _p = url.split(':', 2)
+        return _rest_category_entries(_p[1], _p[2]) if len(_p) == 3 else []
     if not url.startswith('carousel:'):
         return []
     parts = url[9:].split(':', 8)
@@ -896,7 +1077,10 @@ def showEntries(url='', params=None):
     position    = parts[5] if len(parts) > 5 else '0'
     href        = urllib.parse.unquote(parts[6]) if len(parts) > 6 else ''
     title       = urllib.parse.unquote(parts[7]) if len(parts) > 7 else ''
-    start       = int(parts[8]) if len(parts) > 8 else 0
+    try:
+        start = int(parts[8]) if len(parts) > 8 else 0
+    except ValueError:
+        start = 0
     entries, total = _carousel_data(token, carousel_id=carousel_id, carousel_type=c_type,
                                     model=model, position=position, title=title, href=href,
                                     start=start, rows=_PAGE_SIZE)
@@ -905,6 +1089,8 @@ def showEntries(url='', params=None):
     items = []
     skipped = []
     for e in entries:
+        if not isinstance(e, dict):
+            continue
         item = _item_from_entry(e)
         if item:
             items.append(item)
@@ -912,6 +1098,10 @@ def showEntries(url='', params=None):
             skipped.append(e.get('contentType', '?'))
     if skipped:
         log.log('[PlutoTV] showEntries carouselId=%s übersprungen contentTypes=%s' % (carousel_id, skipped), log.LOGWARNING)
+    if not items:
+        log.log('[PlutoTV] showEntries carouselId=%s: alle %d Einträge übersprungen, versuche REST' % (
+            carousel_id, len(entries)), log.LOGWARNING)
+        return _rest_carousel_fallback(carousel_id, kind=_kind)
     log.log('[PlutoTV] showEntries carouselId=%s count=%d (raw=%d total=%d start=%d)' % (
         carousel_id, len(items), len(entries), total, start))
     next_start = start + _PAGE_SIZE
@@ -933,13 +1123,62 @@ def showEntries(url='', params=None):
     return items
 
 
+def _rest_seasons(show_id):
+    """Staffeln/Episoden per REST (Fallback, wenn PaginatedFullEpisodesData nichts liefert)."""
+    did = _get_device_id()
+    params = {
+        'deviceType': 'web', 'deviceMake': 'chrome', 'deviceModel': 'web',
+        'deviceVersion': '136.0.0', 'appName': 'web', 'appVersion': _APP_VERSION,
+        'deviceId': did, 'clientID': did, 'sid': _get_session_id(),
+        'userState': 'ANONYMOUS', 'userRegistrationCountry': _COUNTRY,
+        'userProfileType': 'ADULT', 'packageCode': 'NEW_FREE_PACKAGE',
+    }
+    body, status = _http_get('https://api.pluto.tv/v3/vod/series/%s/seasons' % show_id,
+                             params=params, timeout=20, extra_headers={'Content-Type': None})
+    if not body or status >= 400:
+        return {}
+    try:
+        seasons = json.loads(body).get('seasons') or []
+    except Exception:
+        return {}
+    out = {}
+    for se in seasons:
+        if not isinstance(se, dict):
+            continue
+        num = se.get('number') or 1
+        eps = []
+        for ep in (se.get('episodes') or []):
+            if not isinstance(ep, dict) or not ep.get('_id'):
+                continue
+            thumb = ''
+            for img in (ep.get('covers') or []):
+                if isinstance(img, dict) and img.get('url'):
+                    thumb = img['url']
+                    break
+            if not thumb:
+                po = ep.get('poster') or {}
+                thumb = po.get('path', '') if isinstance(po, dict) else ''
+            if thumb and not thumb.startswith('http'):
+                thumb = _image(thumb)
+            eps.append({'contentId': ep['_id'], 'title': ep.get('name') or '',
+                        'episodeNum': ep.get('number') or 0, 'seasonNum': num,
+                        'thumb': thumb, 'description': ep.get('description') or ''})
+        out[str(num)] = eps
+    log.log('[PlutoTV] REST Staffeln showId=%s seasons=%s' % (show_id, sorted(out.keys())))
+    return out
+
+
 def showSeasons(url='', params=None):
     if not url.startswith('show:'):
         return []
     show_id = url[5:].split(':')[0]
     season_nums, _ = _paginated_episodes(show_id, '1')
     if not season_nums:
-        return showEpisodes('show:%s:1' % show_id)
+        rest = _rest_seasons(show_id)
+        if rest:
+            season_nums = sorted(rest.keys(), key=lambda x: int(x) if str(x).isdigit() else 0)
+        else:
+            return showEpisodes('show:%s:1' % show_id)
     if len(season_nums) == 1:
         return showEpisodes('show:%s:%s' % (show_id, season_nums[0]))
     items = []
@@ -966,8 +1205,12 @@ def showEpisodes(url='', params=None):
     show_id    = parts[0]
     season_num = parts[1] if len(parts) > 1 else '1'
     _, episodes = _paginated_episodes(show_id, season_num)
+    if not episodes:
+        episodes = _rest_seasons(show_id).get(str(season_num), [])
     items = []
     for ep in episodes:
+        if not isinstance(ep, dict):
+            continue
         cid = ep.get('contentId') or ''
         if not cid:
             continue
@@ -999,7 +1242,6 @@ _LIVE_ALL        = '__all__'
 
 
 def _live_feed():
-    import gzip
     now = time.time()
     if _LIVE_FEED_CACHE['data'] is not None and (now - _LIVE_FEED_CACHE['ts']) < _LIVE_FEED_TTL:
         return _LIVE_FEED_CACHE['data']
@@ -1158,8 +1400,11 @@ def get_live(url='', params=None):
     seen  = set()
     no_id = 0
     for ch in channels:
+        if not isinstance(ch, dict):
+            continue
+        listing = (ch.get('currentListing') or [{}])[0] or {}
         ch_id = (ch.get('videoContentId') or
-                 (ch.get('currentListing') or [{}])[0].get('contentCANVideo', {}).get('contentId') or '')
+                 (listing.get('contentCANVideo') or {}).get('contentId') or '')
         if not ch_id:
             no_id += 1
             continue
@@ -1170,7 +1415,6 @@ def get_live(url='', params=None):
         logo  = (ch.get('resolvedfilePathLogoSelected') or
                  ch.get('resolvedfilePathLogo') or
                  _image(ch.get('filePathLogo') or ''))
-        listing = (ch.get('currentListing') or [{}])[0]
         plot  = listing.get('description') or ch.get('description') or ''
         now_playing = listing.get('title') or ''
         if now_playing:
@@ -1227,7 +1471,7 @@ def _scout_resolve(title, year, season, episode):
     data = _gql(_GQL_HUBS, 'GetVODContent', {'query': title})
     if not data:
         return ''
-    raw = ((data.get('data') or {}).get('searchVODContent') or {}).get('data') or []
+    raw = [e for e in _dig_list(data, 'data', 'searchVODContent', 'data') if isinstance(e, dict)]
     hits = [e for e in raw if _title_matches(title, e.get('title') or '')]
     if not hits:
         return ''
@@ -1238,7 +1482,7 @@ def _scout_resolve(title, year, season, episode):
     movies = [e for e in hits if e.get('contentType') == 'movie']
     if movies and not season and not episode:
         return 'movie:%s' % (movies[0].get('movieId') or movies[0].get('id'))
-    shows = [e for e in hits if e.get('contentType') == 'show']
+    shows = [e for e in hits if e.get('contentType') in ('show', 'series')]
     if not shows:
         return ''
     show_id = shows[0].get('id')
