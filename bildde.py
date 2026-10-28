@@ -6,6 +6,7 @@ import json
 import re
 from email.utils import parsedate_to_datetime
 from html import unescape
+from urllib.parse import quote, unquote
 from xml.etree import ElementTree as ET
 
 from resources.lib import log, multiquest
@@ -100,7 +101,7 @@ def parse_feed(data):
     for it in root.iter():
         if _tag(it) not in ('item', 'entry'):
             continue
-        d = {'title': '', 'link': '', 'summary': '', 'image': '', 'date': ''}
+        d = {'title': '', 'link': '', 'summary': '', 'image': '', 'date': '', 'video': ''}
         desc = ''
         for ch in it.iter():
             if ch is it:
@@ -116,6 +117,9 @@ def parse_feed(data):
                 desc = ch.text or ''
             elif t in ('pubdate', 'published', 'updated', 'date') and not d['date']:
                 d['date'] = text
+            elif t in ('enclosure', 'content') and not d['video'] and ch.get('url') and (
+                    (ch.get('type') or '').lower().startswith('video') or _STREAM_EXT.search(ch.get('url') or '')):
+                d['video'] = ch.get('url')
             elif t == 'enclosure' and not d['image'] and _is_image(ch.get('url'), ch.get('type') or ''):
                 d['image'] = ch.get('url')
             elif t in ('content', 'thumbnail') and not d['image'] and ch.get('url'):
@@ -203,23 +207,56 @@ def article_text(html, url=''):
     return out or [teaser or 'Kein Artikeltext gefunden.']
 
 
-def article_videos(html):
-    """Videos der Seite: [(titel, stream_url)] – aus den Seitendaten (VideoObject) oder direkten .m3u8/.mp4-Links."""
-    found, seen = [], set()
+_STREAM_EXT = re.compile(r'\.(?:m3u8|mp4|m4v|mov)(?:\?|$)', re.I)
+_VIDEO_HINT = re.compile(r'(?:glomex|jwplatform|jwpcdn|brightcove|akamaihd|cloudfront|vod\.|video\.|stream\.|cdn\.)[^"\'\s<>\\]{0,80}', re.I)
 
-    def add(title, u):
-        u = (u or '').replace('\\/', '/').strip()
+
+def _unescape_js(text):
+    """Seitentext für die Videosuche: JSON-/JS-Masken (\\/, \\u002F, \\u0026, &amp;) auflösen."""
+    t = text or ''
+    for a, b in (('\\u002F', '/'), ('\\u002f', '/'), ('\\u0026', '&'), ('\\/', '/'), ('&amp;', '&')):
+        t = t.replace(a, b)
+    return t
+
+
+def article_videos(html):
+    """Videos der Seite: [(titel, stream_url)].
+
+    Quellen: VideoObject (contentUrl) in den Seitendaten, og:video, <video>/<source>, sowie jeder direkte
+    .m3u8/.mp4/.mov-Link irgendwo im Seitentext (auch in Skripten/JSON).
+    """
+    found, seen = [], set()
+    text = _unescape_js(html)
+
+    def add(title, u, loose=False):
+        u = (u or '').strip()
         if u.startswith('//'):
             u = 'https:' + u
-        if u.startswith('http') and re.search(r'\.(m3u8|mp4)(\?|$)', u, re.I) and u not in seen:
+        if not u.startswith('http') or u in seen:
+            return
+        if _STREAM_EXT.search(u) or loose:
             seen.add(u)
             found.append((title or 'Video', u))
 
     for o in _ld_objects(html):
         if 'videoobject' in _types(o):
-            add(o.get('name') or o.get('headline'), o.get('contentUrl'))
-    for m in re.finditer(r'https?:(?:\\?/){2}[^"\'\s<>]+?\.(?:m3u8|mp4)(?:\?[^"\'\s<>]*)?', html or ''):
-        add('', m.group(0))
+            title = o.get('name') or o.get('headline')
+            add(title, _unescape_js(str(o.get('contentUrl') or '')), loose=True)
+    for prop in ('og:video', 'og:video:url', 'og:video:secure_url', 'twitter:player:stream'):
+        add('', _unescape_js(_meta(html, prop)))
+    for m in re.finditer(r'<(?:video|source)\b[^>]+\bsrc=["\']([^"\']+)', text, re.I):
+        add('', unescape(m.group(1)))
+    for m in re.finditer(r'https?://[^"\'\s<>\\]+?\.(?:m3u8|mp4|m4v|mov)(?:\?[^"\'\s<>\\]*)?', text):
+        u = m.group(0)
+        if not re.search(r'(?:thumb|preview|poster|sprite)', u, re.I):
+            add('', u)
+    if not found:
+        hosts = sorted({m.group(0)[:60] for m in _VIDEO_HINT.finditer(text)})[:8]
+        log.log('[BILD] Kein Video im Seitentext. <video>=%d, VideoObject=%d, Hinweise: %s' % (
+            len(re.findall(r'<video\b', text, re.I)), sum('videoobject' in _types(o) for o in _ld_objects(html)),
+            ', '.join(hosts) or '-'), log.LOGINFO)
+    else:
+        log.log('[BILD] %d Video(s) gefunden: %s' % (len(found), found[0][1][:100]), log.LOGINFO)
     return found
 
 
@@ -237,11 +274,11 @@ def showEntries(url='', params=None):
     for e in parse_feed(_get(url, raw=True)):
         items.append({
             'title':       e['title'],
-            'url':         e['link'],
+            'url':         e['link'] + ('#v=' + quote(e['video'], safe='') if e.get('video') else ''),
             'plot':        '\n\n'.join(x for x in (_date(e['date']), e['summary']) if x),
             'poster':      e['image'],
             'fanart':      e['image'],
-            'live':        True,           
+            'live':        True,          
             'is_playable': False,
             'next_func':   'showArticle',
         })
@@ -251,12 +288,19 @@ def showEntries(url='', params=None):
 
 def showArticle(url='', params=None):
     """Artikel als Liste: zuerst Videos (abspielbar), dann der Text Absatz für Absatz."""
+    feed_video = ''
+    if '#v=' in url:
+        url, feed_video = url.split('#v=', 1)
+        feed_video = unquote(feed_video)
     html = _get(url)
     if not html:
         return [{'title': 'Artikel konnte nicht geladen werden.', 'url': 'lesen', 'no_cache': True,
                  'is_playable': False, 'next_func': 'nothing'}]
     items = []
-    for i, (title, stream) in enumerate(article_videos(html), 1):
+    vids = article_videos(html)
+    if feed_video and feed_video not in [v[1] for v in vids]:
+        vids.insert(0, ('Video', feed_video))
+    for i, (title, stream) in enumerate(vids, 1):
         items.append({
             'title':       '▶ Video abspielen' + (': %s' % title if title and title != 'Video' else (' %d' % i if i > 1 else '')),
             'url':         stream,
@@ -276,7 +320,7 @@ def nothing(url='', params=None):
 def get_hosters(title='', year='', season=0, episode=0, imdb='', tmdb='', url='', params=None):
     if not url:
         return []
-    if not re.search(r'\.(m3u8|mp4)(\?|$)', url, re.I):           
+    if not re.search(r'\.(m3u8|mp4)(\?|$)', url, re.I):
         vids = article_videos(_get(url))
         if not vids:
             return []
