@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Tube8 
+# IT('s) Possible 
+# 2026.10.28
 """ZDF Mediathek – erzeugt mit dem MovieScout Scraper-Baukasten (2026-10-28).
 
 Alle Einstellungen stehen unten in CFG. Diese Datei kann im Baukasten wieder geöffnet und weiterbearbeitet werden.
