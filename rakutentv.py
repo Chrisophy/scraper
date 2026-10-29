@@ -111,10 +111,14 @@ def _fetch_widevine_cert(license_url, ua):
 def _client_widevine():
     """MovieScout meldet die Widevine-Stufe des abspielenden Browsers ('L1' = Hardware, 'L3' = Software).
     Im echten Kodi ist das Label leer."""
-    try:
-        return (xbmc.getInfoLabel('MovieScout.Client.Widevine') or '').upper()
-    except Exception:
-        return ''
+    for label in ('MovieScout.Client.Widevine', 'MiniKodi.Client.Widevine'):   # neue und ältere Engine
+        try:
+            v = (xbmc.getInfoLabel(label) or '').upper()
+        except Exception:
+            v = ''
+        if v:
+            return v
+    return ''
 
 
 def _license_mode():
@@ -1205,6 +1209,8 @@ def _request_stream(content_id, content_type, is_live=False, lang='DEU', quality
         label += ' [%s]' % stype.upper() if stype else ''
         if quality and not is_live:
             label += ' %s' % quality
+        if not is_live:     # sichtbar machen, welcher Weg genommen wurde (hilft bei 403)
+            label += ' – Android-TV-Weg' if is_android else (' – Web-Weg' if addon_like else ' – Browser-Weg')
         results.append([label, surl, drm_info, '', '', 'rakutentv'])
         log.log('[RakutenTV] stream stype=%s url=%s' % (stype, surl[:80]))
     return results
