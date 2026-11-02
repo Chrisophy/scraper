@@ -1,4 +1,6 @@
-# joynfree.py
+# -*- coding: utf-8 -*-
+# JoynFree
+# IT('s) Possible 
 # 2026.10.20
 import hashlib
 import json

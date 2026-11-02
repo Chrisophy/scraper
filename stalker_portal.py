@@ -12,8 +12,8 @@ import xbmcaddon
 from resources.lib import multiquest
 
 try:
-    from engine import epg as EPG          # gemeinsame EPG-Logik (dieselbe Guide-Adresse wie bei M3U / IPTV)
-except Exception:                           # noqa: BLE001  (Datei engine/epg.py fehlt: Portal läuft ohne EPG weiter)
+    from engine import epg as EPG          
+except Exception:                           
     EPG = None
 
 SITE_ID = 'stalker_portal'
@@ -25,7 +25,7 @@ GLOBAL_SEARCH = False
 _UA = ('Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) '
        'MAG200 stbapp ver: 4 rev: 1812 Mobile Safari/533.3')
 _TIMEOUT = 15
-_TOKENS = {}           # portal_url -> (token, geholt_um)
+_TOKENS = {}           
 _TOKEN_TTL = 3000
 _LOCK = threading.Lock()
 
@@ -76,6 +76,7 @@ def _headers(portal, token=None):
     }
     if token:
         h['Authorization'] = 'Bearer ' + token
+        h['Cookie'] += ' access_token=%s;' % token          
     return h
 
 
@@ -130,8 +131,6 @@ def _logo(portal, path):
     return portal['url'] + (path if path.startswith('/') else '/' + path)
 
 
-# ----------------------------------------------------------------------------- Navigation
-
 def load(url='', params=None):
     params = params or {}
     lvl = params.get('lvl') or 'root'
@@ -161,7 +160,10 @@ def load(url='', params=None):
             ]
         if lvl == 'genres':
             if EPG:
-                EPG.prefetch()                                  # Guide schon im Hintergrund laden, bis ein Genre geöffnet wird
+                try:
+                    EPG.prefetch()
+                except Exception:                             
+                    pass
             js = _call(portal, {'type': 'itv', 'action': 'get_genres'})
             out = []
             for g in (js or []):
@@ -176,20 +178,29 @@ def load(url='', params=None):
             js = _call(portal, {'type': 'itv', 'action': 'get_all_channels'})
             rows = (js or {}).get('data') or []
             rows = [c for c in rows if not gid or str(c.get('tv_genre_id')) == str(gid)]
-            epg = EPG.get() if (EPG and rows) else {}
+            try:
+                epg = EPG.get() if (EPG and rows) else {}
+            except Exception:                                  
+                epg = {}
             out = []
             for c in rows:
                 plot = now = ''
                 if epg:
-                    plot, now = EPG.now_next(epg, {'name': c.get('name') or '', 'tvg_id': str(c.get('xmltv_id') or ''), 'tvg_name': ''})
+                    try:
+                        plot, now = EPG.now_next(epg, {'name': c.get('name') or '', 'tvg_id': str(c.get('xmltv_id') or ''), 'tvg_name': ''})
+                    except Exception:                           
+                        plot = now = ''
                 out.append({'title': c.get('name') or '?', 'poster': _logo(portal, c.get('logo') or ''),
                            'is_playable': True, 'live': True, 'next_func': 'get_hosters', 'plot': plot, 'now': now,
                            'params': {'i': i, 't': 'itv', 'cmd': c.get('cmd') or ''}})
             if EPG:
-                chs = [{'name': c.get('name') or '', 'tvg_id': str(c.get('xmltv_id') or ''), 'tvg_name': ''} for c in rows]
-                st = EPG.status_line(chs)
+                try:
+                    chs = [{'name': c.get('name') or '', 'tvg_id': str(c.get('xmltv_id') or ''), 'tvg_name': ''} for c in rows]
+                    st = EPG.status_line(chs)
+                    miss = EPG.unmatched(chs) if st else []
+                except Exception:                              
+                    st, miss = '', []
                 if st:
-                    miss = EPG.unmatched(chs)
                     out.append({'title': st, 'is_playable': False, 'next_func': 'load',
                                 'plot': ('Ohne Guide-Eintrag, z. B.: ' + ', '.join(miss)) if miss else '',
                                 'url': _tag({'lvl': 'channels', 'i': i, 'gid': gid, 'st': 1}), 'params': params})
@@ -283,6 +294,21 @@ def _episode_list(portal, i, season_cat, category):
     return out
 
 
+def _stream_of(js):
+    raw = ''
+    if isinstance(js, dict):
+        raw = str(js.get('cmd') or '')
+    raw = raw[len('ffmpeg '):] if raw.startswith('ffmpeg ') else raw
+    stream, _, hdr = raw.partition('|')
+    stream = stream.strip().split(' ')[-1].strip().replace('"', '')
+    headers = {}
+    for part in hdr.split('&'):
+        k, sep, v = part.partition('=')
+        if sep:
+            headers[k.strip()] = v.strip()
+    return stream, headers
+
+
 def get_hosters(url='', params=None):
     params = params or {}
     i = params.get('i')
@@ -291,22 +317,19 @@ def get_hosters(url='', params=None):
     if not portal or not cmd:
         return []
     t = params.get('t') or 'itv'
-    call_params = {'type': 'itv' if t == 'itv' else 'vod', 'action': 'create_link',
-                   'cmd': cmd, 'forced_storage': 'undefined', 'disable_ad': '0'}
+    call_params = {'type': 'itv' if t == 'itv' else 'vod', 'action': 'create_link', 'cmd': cmd}
+    if t != 'itv':                                              
+        call_params.update({'forced_storage': 'undefined', 'disable_ad': '0'})
     if t == 'series' and params.get('series'):
         call_params['series'] = params['series']
     js = _call(portal, call_params)
-    raw = (js or {}).get('cmd') or ''
-    raw = raw[len('ffmpeg '):] if raw.startswith('ffmpeg ') else raw
-    stream, _, hdr = raw.partition('|')
-    stream = stream.strip().split(' ')[-1].strip()
+    stream, headers = _stream_of(js)
+    if not stream and t == 'series':
+        call_params.pop('series', None)                         
+        stream, headers = _stream_of(_call(portal, call_params))
     if not stream:
-        return []
-    headers = {}
-    for part in hdr.split('&'):
-        k, sep, v = part.partition('=')
-        if sep:
-            headers[k.strip()] = v.strip()
+        answer = json.dumps(js, ensure_ascii=False)[:300] if js is not None else 'leer'
+        raise RuntimeError('Portal liefert für diesen Eintrag keine Adresse (Antwort: %s)' % answer)
     h = {'name': portal['name'], 'url': stream, 'direct': True, 'live': t == 'itv'}
     if headers:
         h['headers'] = headers

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Tube8 
+# Bild.de News 
 # IT('s) Possible 
 # 2026.10.28
 import json

@@ -8,7 +8,7 @@ import threading
 import time
 
 import xbmcaddon
-from engine import epg as EPG          # gemeinsame EPG-Logik (auch für Stalker-Portale)
+from engine import epg as EPG
 from resources.lib import multiquest
 
 SITE_ID = 'm3u_iptv'
@@ -22,7 +22,7 @@ _ATTR = re.compile(r'([A-Za-z0-9\-]+)="([^"]*)"')
 _VLCOPT = re.compile(r'^#EXTVLCOPT:(\S+?)=(.+)$')
 
 _LOCK = threading.Lock()
-_M3U_CACHE = {}           # url -> (geladen_um, [channel, ...])
+_M3U_CACHE = {}          
 _M3U_TTL = 6 * 3600
 
 
@@ -140,8 +140,6 @@ def _channel_item(c, epg):
     }
 
 
-# ----------------------------------------------------------------------------- Navigation
-
 def load(url='', params=None):
     params = params or {}
     lvl = params.get('lvl') or 'root'
@@ -151,7 +149,7 @@ def load(url='', params=None):
             _M3U_CACHE.clear()
         EPG.clear()
         lvl = 'root'
-        EPG.prefetch()                                  # Guide gleich im Hintergrund neu holen
+        EPG.prefetch()                                 
     if not playlists:
         return [{'title': 'Keine Playlist eingetragen – unter Einstellungen → M3U/IPTV hinzufügen',
                  'is_playable': False, 'next_func': 'load'}]

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Tube8 
+# ZDF Mediathek
 # IT('s) Possible 
 # 2026.10.28
 """ZDF Mediathek – erzeugt mit dem MovieScout Scraper-Baukasten (2026-10-28).

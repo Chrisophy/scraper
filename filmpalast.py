@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# filmpalast.py
+# Filmpalast.to
+# IT('s) Possible 
 # 2026.11.01
 import re
 from html import unescape
@@ -301,51 +302,11 @@ def load(url='', params=None):
 
 
 def search(query='', params=None):
-    if not query and isinstance(params, dict):
-        query = params.get('query') or params.get('keyword') or params.get('search') or ''
-    
-    q = (query or '').strip()
-    
-    if not q:
-        try:
-            q = xbmcgui.Dialog().input('Suche').strip()
-        except Exception:
-            pass
-            
+    q = query or xbmcgui.Dialog().input('Suche')
     if not q:
         return []
-    
-    search_url = _URL_MAIN + '/search/title/%s/page/1' % quote_plus(q)
-    sHtml = _get(search_url)
-    
-    if not sHtml:
-        search_url = _URL_MAIN + '/index.php?do=search&subaction=search&story=' + quote_plus(q)
-        sHtml = _get(search_url)
-        
-    if not sHtml:
-        log.log('[FilmPalast] Suche fehlgeschlagen für: %s' % q)
-        return []
-        
-    items = _parse_items(sHtml)
-    
-    if not items:
-        log.log('[FilmPalast] Keine Standard-Treffer, versuche alternativen Parser für: %s' % q)
-        for m in re.finditer(r'href=["\']([^"\']+/stream/[a-z0-9\-]+)["\'][^>]*>(.*?)</a>', sHtml, re.S):
-            link = m.group(1)
-            if link.startswith('/'):
-                link = _URL_MAIN + link
-            clean_title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
-            if clean_title and 'Nächste' not in clean_title:
-                slug = link.rstrip('/').split('/')[-1]
-                items.append({
-                    'title': unescape(clean_title),
-                    'url': link,
-                    'slug': slug,
-                    'is_playable': True,
-                    'next_func': 'get_hosters',
-                })
-                
-    return items
+    sHtml = _get(_URL_SEARCH % quote_plus(q))
+    return _parse_items(sHtml)
 
 
 def get_hosters(title='', year='', season=0, episode=0, url='', params=None):

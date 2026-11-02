@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Tube8 
+# ARD Mediathek 
 # IT('s) Possible 
 # 2026.10.28
 """ARD Mediathek – erzeugt mit dem MovieScout Scraper-Baukasten (2026-10-28).

@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Express.de News 
+# IT('s) Possible 
+# 2026.10.28
 import json
 import re
 from datetime import datetime

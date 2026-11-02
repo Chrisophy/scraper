@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
+# GEZ KiNO
 # IT('s) Possible 
 # 2026.10.19
-# MovieScout Scraper gezkino.py
 import re
 import base64
 import json
