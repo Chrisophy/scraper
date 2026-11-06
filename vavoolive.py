@@ -20,6 +20,11 @@ import xbmcaddon
 from resources.lib import log
 from resources.lib.vavootv import VavooClient, BUNDLES
 
+try:                                       # EPG (XMLTV) der Engine; in einem echten Kodi nicht vorhanden -> dann ohne Programmvorschau
+    from engine import epg as _EPG
+except Exception:                          # noqa: BLE001
+    _EPG = None
+
 SITE_ID       = 'vavoolive'
 SITE_NAME     = 'Vavoo Live TV'
 SITE_DOMAIN   = 'vavoo.to'
@@ -33,7 +38,7 @@ _MAX_SOURCES = 4                    # mehr Quellen (.b/.c/Backup) pro Sender wer
 _PREFER      = ('germany', 'deutschland', 'austria', 'österreich', 'switzerland', 'schweiz')
 
 _lock = threading.Lock()
-_state = {'client': None, 'channels': None, 'ts': 0.0, 'portal': ''}
+_state = {'client': None, 'channels': None, 'ts': 0.0, 'portal': '', 'error': ''}
 
 
 # ----------------------------------------------------------------------------- Hilfen
@@ -86,7 +91,7 @@ def _load_channels(force=False):
         if (not force and _state['channels'] and time.time() - _state['ts'] < _CACHE_TTL):
             return _state['channels']
 
-    deadline = time.time() + 38
+    deadline = time.time() + 45
     last_err = ''
     for portal in _portals():
         if time.time() > deadline:
@@ -101,14 +106,16 @@ def _load_channels(force=False):
         channels = _group_channels(raw)
         if channels:
             with _lock:
-                _state.update(client=client, channels=channels, ts=time.time(), portal=portal)
+                _state.update(client=client, channels=channels, ts=time.time(), portal=portal, error='')
             log.log('[VavooLive] %d Sender (%s)' % (len(channels), portal))
             return channels
-        log.log('[VavooLive] Portal %s lieferte keine Sender' % portal, log.LOGWARNING)
+        last_err = last_err or getattr(client, 'last_error', '') or 'keine Sender'     # der Grund des ersten (eigenen/Haupt-)Portals zählt
+        log.log('[VavooLive] Portal %s lieferte keine Sender: %s' % (portal, last_err), log.LOGWARNING)
     with _lock:
         if _state['channels']:       # alter Stand ist besser als nichts
             return _state['channels']
-    xbmcgui.Dialog().notification('Vavoo Live TV', 'Keine Senderliste erhalten. Portal nicht erreichbar? %s' % last_err[:80])
+        _state['error'] = last_err or 'Kein Portal erreichbar'
+    xbmcgui.Dialog().notification('Vavoo Live TV', 'Keine Senderliste erhalten. %s' % (last_err or 'Portal nicht erreichbar?')[:80])
     return []
 
 
@@ -151,21 +158,56 @@ def _group_names(channels):
     return [(g, counts[g]) for g in sorted(counts, key=rank)]
 
 
-def _item(ch):
+def _epg():
+    """Programmführer der Engine (Einstellung "EPG-Adresse"); lädt im Hintergrund, blockiert die Senderliste nicht."""
+    if _EPG is None:
+        return {}
+    try:
+        return _EPG.get(wait=False) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _item(ch, epg=None):
+    info = '[B]%s[/B]%s' % (ch['group'], ('\nQualität: ' + ch['quality']) if ch['quality'] else '')
+    plot, now = '', ''
+    if epg and _EPG is not None:
+        try:
+            plot, now = _EPG.now_next(epg, {'name': ch['name']})
+        except Exception:  # noqa: BLE001
+            plot, now = '', ''
     return {
         'title': ch['name'],
         'url': '\n'.join(ch['urls'][:_MAX_SOURCES]),
         'poster': ch.get('logo') or '',
         'icon': ch.get('logo') or '',
-        'plot': '[B]%s[/B]%s' % (ch['group'], ('\nQualität: ' + ch['quality']) if ch['quality'] else ''),
+        'plot': (plot + '\n\n' + info) if plot else info,
+        'now': now,
+        'live': True,
         'mediatype': 'video',
         'is_playable': True,
         'next_func': 'get_hosters',
     }
 
 
+def _items(channels):
+    epg = _epg()
+    return [_item(c, epg) for c in channels]
+
+
+def _problem():
+    """Eintrag statt leerer Liste, damit der Grund sichtbar ist."""
+    with _lock:
+        err = _state.get('error') or ''
+    return [_folder('Keine Senderliste erhalten – tippen zum erneuten Laden', '', 'reload',
+                    (err or 'Portal nicht erreichbar.') + '\nTipp: Einstellungen → Diagnose; anderes Portal in „vavoo_portal“ eintragen.')]
+
+
 def _folder(title, url, func, plot=''):
-    return {'title': title, 'url': url, 'plot': plot, 'is_playable': False, 'next_func': func}
+    d = {'title': title, 'url': url, 'plot': plot, 'is_playable': False, 'next_func': func}
+    if func == 'reload':
+        d['no_cache'] = True            # "Neu laden" muss jedes Mal wirklich laden, nicht aus dem Zwischenspeicher antworten
+    return d
 
 
 # ----------------------------------------------------------------------------- Menüs
@@ -185,12 +227,16 @@ def reload(url='', params=None):
     with _lock:
         _state.update(channels=None, ts=0.0)
     ch = _load_channels(force=True)
+    if not ch:
+        return _problem()
     xbmcgui.Dialog().notification('Vavoo Live TV', '%d Sender geladen' % len(ch))
     return []
 
 
 def showGroups(url='', params=None):
     channels = _load_channels()
+    if not channels:
+        return _problem()
     return [_folder('%s (%d)' % (g, n), 'g:' + g, 'showChannels') for g, n in _group_names(channels)]
 
 
@@ -219,7 +265,7 @@ def showChannels(url='', params=None):
         pool = [c for c in pool if (c['name'][:1].upper() if c['name'][:1].isalpha() else '#') == letter]
     elif scope is None or len(pool) > _BIG_GROUP:
         return showLetters(url if scope is not None else 'all', params)
-    return [_item(c) for c in pool]
+    return _items(pool)
 
 
 def search(query='', params=None):
@@ -231,7 +277,7 @@ def search(query='', params=None):
         return []
     hits = [c for c in _load_channels() if q in c['name'].lower()]
     hits.sort(key=lambda c: (not c['name'].lower().startswith(q), c['name'].lower()))
-    return [_item(c) for c in hits[:300]]
+    return _items(hits[:300])
 
 
 # ----------------------------------------------------------------------------- Abspielen
