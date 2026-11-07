@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# AniWorld
+# IT('s) Possible 
+# 2026.11.07
 import re
 import datetime
 from urllib.parse import quote

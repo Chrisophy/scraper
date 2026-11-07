@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Streamcloud
+# IT('s) Possible 
+# 2026.11.07
 import re
 import json
 import time

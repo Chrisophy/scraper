@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Serienstream
+# IT('s) Possible 
+# 2026.11.07
 import os
 import re
 import json

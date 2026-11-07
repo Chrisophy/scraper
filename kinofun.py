@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Kino Fun
+# IT('s) Possible 
+# 2026.11.07
 import re
 import ast
 from urllib.parse import quote

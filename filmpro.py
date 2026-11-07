@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# FilmPro
+# IT('s) Possible 
+# 2026.11.07
 import re
 import html as _html
 from urllib.parse import quote

@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# xCine
+# IT('s) Possible 
+# 2026.11.07
 import re
 from html import unescape
 from urllib.parse import quote_plus

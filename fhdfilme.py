@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# FHD Filme
+# IT('s) Possible 
+# 2026.11.07
 import re
 import json as _json
 from urllib.parse import quote as _quote

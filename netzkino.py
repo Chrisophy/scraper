@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
+# Netzkino
+# IT('s) Possible 
+# 2026.09.21
 # Scraper by mr-evil1
 # mod by Zusatzmetall
-# IT('s) Possible Team
-# 2026.09.21
 import json
 import re
 import urllib.parse

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # JoynFree
 # IT('s) Possible 
-# 2026.10.20
+# 2026.11.07
 import hashlib
 import json
 import re
@@ -862,7 +862,14 @@ def _build_sig(client_data_json, ent_token):
     return hashlib.sha1(sha_input.encode('utf-8')).hexdigest()
 
 
-def _get_ent(video_id, stream_type):
+def _reset_identity():
+    """Neue anonyme Sitzung: Token-Cache leeren und neue Geräte-ID erzeugen."""
+    global _DEVICE_ID
+    _TCACHE.clear()
+    _DEVICE_ID = None
+
+
+def _get_ent(video_id, stream_type, _retry=True):
     log.log('[Joyn] _get_ent video_id=%s type=%s' % (video_id, stream_type))
     tok = _token()
     if not tok:
@@ -877,12 +884,23 @@ def _get_ent(video_id, stream_type):
                           {'content_id': video_id, 'content_type': stream_type}, h)
     if not body or st >= 400:
         log.log('[Joyn] _get_ent FAILED HTTP %d body=%s' % (st, body[:300]), log.LOGWARNING)
-        if 'ENT_AgeVerificationSetupRequired' in body or 'age' in body.lower() or '16' in body or '18' in body:
+        low = body.lower()
+        # Jugendschutz (FSK): nur bei eindeutigen Meldungen, nicht bei jedem Text mit "age"/"16"/"18"
+        if 'ageverification' in low or 'age_verification' in low or 'fsk' in low or 'jugendschutz' in low:
             fsk_text = _FSK_MAP.get(video_id)
             if not fsk_text:
                 fsk_text = 'FSK ab 18 – erst ab 0 Uhr' if '18' in body else 'FSK ab 16 – erst ab 22 Uhr'
             log.log('[Joyn] Jugendschutz greift: %s' % fsk_text, log.LOGERROR)
             raise Exception(fsk_text)
+        # Zugriff verweigert / Sitzung abgelehnt: einmal mit frischer anonymer Sitzung erneut versuchen
+        if _retry and (st in (401, 403) or 'playback_restricted' in low or 'ent_' in low):
+            log.log('[Joyn] _get_ent: neue anonyme Sitzung, zweiter Versuch', log.LOGWARNING)
+            _reset_identity()
+            return _get_ent(video_id, stream_type, _retry=False)
+        if 'playback_restricted' in low:
+            log.log('[Joyn] Wiedergabe eingeschränkt (nicht frei abrufbar / Joyn Plus / Lizenz abgelaufen)',
+                    log.LOGERROR)
+            raise Exception('Joyn: Dieser Titel ist nicht frei abrufbar (Joyn Plus, Lizenz abgelaufen oder gesperrt)')
         return ''
     try:
         parsed = json.loads(body)

@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Megakino
+# IT('s) Possible 
+# 2026.11.07
 import re
 import time
 from urllib.parse import quote_plus, urlparse

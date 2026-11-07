@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Rakuten TV
+# IT('s) Possible 
+# 2026.11.07
 #THX zusatzmetall für Hilfe
 import datetime
 import json

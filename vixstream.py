@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Vixstream
+# IT('s) Possible 
+# 2026.11.07
 import re
 import base64
 from urllib.parse import urlencode

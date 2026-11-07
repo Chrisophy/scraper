@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# AnimeToast
+# IT('s) Possible 
+# 2026.11.07
 import re
 import json
 from urllib.parse import quote_plus

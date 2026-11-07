@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# RTL+ Free
+# IT('s) Possible 
+# 2026.11.07
 import hashlib
 import hmac as _hmac
 import json

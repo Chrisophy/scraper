@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-# IT('s) Possible
-# MovieScout Scraper stalker_portal.py
-# Client für eigene Stalker/MAG-Portale (fest eingetragene URL + MAC pro Portal, aus den
-# Engine-Einstellungen). Kein automatisches Suchen/Erraten von MAC-Adressen.
+# Stalker Portal
+# IT('s) Possible 
+# 2026.11.07
 import json
 import math
 import threading

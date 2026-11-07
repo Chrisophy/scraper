@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# MovieScout - Plex Free Movies & Series
+# Plex Free
+# IT('s) Possible 
 # 2026.11.04
-# IT('s) Possible
 import html, json, os, re, time, uuid, threading
 from concurrent.futures import ThreadPoolExecutor, wait
 

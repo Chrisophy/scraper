@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# HD Filme
+# IT('s) Possible 
+# 2026.11.07
 import re
 from urllib.request import Request, urlopen
 from resources.lib import multiquest, log

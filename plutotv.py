@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Pluto TV
+# IT('s) Possible 
+# 2026.11.07
 import bisect
 import gzip
 import hashlib

@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# KinoX.to
+# IT('s) Possible 
+# 2026.11.07
 import re
 from urllib.parse import quote, urlparse
 

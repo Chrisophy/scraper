@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# IT('s) Possible
-# MovieScout Scraper m3u_iptv.py
-# Eigene M3U-Playlisten (IPTV) + EPG (XMLTV), URLs kommen aus den Engine-Einstellungen.
+# M3U / IPTV
+# IT('s) Possible 
+# 2026.11.07
 import json as _json
 import re
 import threading

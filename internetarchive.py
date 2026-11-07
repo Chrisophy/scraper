@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Internet Archive
+# IT('s) Possible 
+# 2026.11.07
 import re
 import json
 import datetime
