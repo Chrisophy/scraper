@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Express.de News 
 # IT('s) Possible 
-# 2026.10.28
+# 2026.11.08
 import json
 import re
 from datetime import datetime
@@ -25,6 +25,7 @@ ACTIVE        = True
 BASE_URL = 'https://www.express.de'
 PER_PAGE = 32
 API_LIMIT = 88
+_CHUNK = 2000          # Sicherheitsgrenze: ein Feld fasst höchstens so viele Zeichen
 FRONT_CHECK_HASH = '021a356684d118a91b7a076a8ade63ea8f04d583'
 VIDEO_TOKENS = {'1': 'GbzYiHVN', '2': 'VhRaNvXL', '3': 'mwMUstde', '4': 'XHwP4VTw'}
 
@@ -129,7 +130,28 @@ def _page_item(label, url, plot):
 
 
 def _text_row(text):
-    return {'title': text, 'url': 'lesen', 'no_cache': True, 'is_playable': False, 'next_func': 'nothing'}
+    return {'title': text, 'url': 'lesen', 'plot': text, 'no_cache': True, 'is_playable': False, 'next_func': 'nothing'}
+
+
+def _chunks(paras, limit=_CHUNK):
+    """Absätze zu möglichst wenigen großen Textblöcken zusammenfassen (Absatzgrenzen bleiben erhalten)."""
+    out, cur = [], ''
+    for p in paras:
+        while len(p) > limit:                      # extrem langen Absatz am Satzende teilen
+            cut = p.rfind('. ', 0, limit)
+            cut = cut + 1 if cut > limit // 2 else limit
+            if cur:
+                out.append(cur)
+                cur = ''
+            out.append(p[:cut].strip())
+            p = p[cut:].strip()
+        if cur and len(cur) + len(p) + 2 > limit:
+            out.append(cur)
+            cur = ''
+        cur = (cur + '\n\n' + p) if cur else p
+    if cur:
+        out.append(cur)
+    return out
 
 
 # ----------------------------------------------------------------------------- Artikel-Listen
@@ -372,7 +394,7 @@ def showEntries(url='', params=None):
 
 
 def showArticle(url='', params=None):
-    """Artikel als Liste: zuerst Videos (abspielbar), dann Datum und Text Absatz für Absatz."""
+    """Artikel als kurze Liste: zuerst die Videos (abspielbar), danach Datum und ganzer Text in einem Feld."""
     html = _get(url)
     if not html:
         return [_text_row('Artikel konnte nicht geladen werden.')]
@@ -388,9 +410,9 @@ def showArticle(url='', params=None):
             'is_playable': True,
             'next_func':   'get_hosters',
         })
-    if date:
-        items.append(_text_row('Veröffentlicht am: %s' % date))
-    items.extend(_text_row(p) for p in (paras or ['Kein Artikeltext gefunden.']))
+    # Datum und Text in einem Feld (nur bei sehr langen Artikeln in wenige große Blöcke geteilt)
+    parts = (['Veröffentlicht am: %s' % date] if date else []) + (paras or ['Kein Artikeltext gefunden.'])
+    items.extend(_text_row(block) for block in _chunks(parts))
     return items
 
 
